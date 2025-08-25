@@ -272,19 +272,28 @@ class CodeMinifier:
             line_start_pos = current_pos
             line_end_pos = current_pos + len(line)
             
+            # 检查是否为shebang行或编码声明行（保留这些特殊注释）
+            stripped_line = line.strip()
+            is_special_comment = self._is_special_comment(stripped_line)
+            
             # 首先检查这一行是否完全在多行字符串内
             if self._is_entirely_in_multiline_string(line_start_pos, line_end_pos, string_ranges):
                 # 在多行字符串内，保留原样
                 result_lines.append(line)
-            elif line.strip().startswith('#'):
-                # 不在多行字符串内的注释行，删除
+            elif stripped_line.startswith('#') and not is_special_comment:
+                # 不在多行字符串内的普通注释行，删除（但保留特殊注释）
                 stats['comments_removed'] += 1
             else:
-                # 不在多行字符串内的普通行，去除行内注释
-                processed_line = self._remove_line_comments(line, line_start_pos, comment_ranges)
-                if processed_line != line:
-                    stats['comments_removed'] += 1
-                result_lines.append(processed_line)
+                # 特殊注释行或普通代码行
+                if is_special_comment:
+                    # 保留特殊注释行
+                    result_lines.append(line)
+                else:
+                    # 不在多行字符串内的普通行，去除行内注释
+                    processed_line = self._remove_line_comments(line, line_start_pos, comment_ranges)
+                    if processed_line != line:
+                        stats['comments_removed'] += 1
+                    result_lines.append(processed_line)
             
             current_pos = line_end_pos + 1  # +1 for newline
         
@@ -504,6 +513,39 @@ class CodeMinifier:
         
         return line
     
+    def _is_special_comment(self, line: str) -> bool:
+        """
+        检查是否为特殊注释行（需要保留的注释）
+        
+        Args:
+            line: 已经strip()的行内容
+            
+        Returns:
+            是否为特殊注释
+        """
+        if not line.startswith('#'):
+            return False
+        
+        # shebang行
+        if line.startswith('#!'):
+            return True
+        
+        # 编码声明行
+        if line.startswith('#') and ('coding' in line.lower() or 'encoding' in line.lower()):
+            # 匹配常见的编码声明格式
+            import re
+            encoding_patterns = [
+                r'#.*?coding[:=]\s*([-\w.]+)',
+                r'#.*?encoding[:=]\s*([-\w.]+)',
+                r'#.*?-\*-.*?coding[:=]\s*([-\w.]+).*?-\*-',
+                r'#.*?vim:.*?fileencoding=\s*([-\w.]+)'
+            ]
+            for pattern in encoding_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    return True
+        
+        return False
+
     def _fallback_analyze_structure(self, code: str) -> Tuple[list, list]:
         """
         当tokenize失败时的备用结构分析方法
@@ -614,9 +656,23 @@ class CodeMinifier:
                 is_docstring = False
                 
                 if isinstance(parent, ast.Module):  # 模块级文档字符串
-                    # 检查是否是模块的第一个语句
+                    # 检查是否是模块的第一个语句（排除shebang和编码声明）
                     if parent.body and parent.body[0] == node:
-                        is_docstring = True
+                        # 额外检查：确保这确实是文档字符串而不是普通字符串
+                        # 检查前面是否只有shebang和编码声明等特殊行
+                        lines = code.split('\n')
+                        string_start_line = node.lineno - 1  # 转为0-based
+                        
+                        # 检查文档字符串前面的行是否都是特殊注释或空行
+                        is_valid_module_docstring = True
+                        for i in range(string_start_line):
+                            line = lines[i].strip()
+                            if line and not self._is_special_comment(line):
+                                is_valid_module_docstring = False
+                                break
+                        
+                        if is_valid_module_docstring:
+                            is_docstring = True
                 elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     # 检查是否是函数/类的第一个语句
                     if parent.body and parent.body[0] == node:
